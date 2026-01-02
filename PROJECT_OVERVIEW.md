@@ -4,6 +4,12 @@
 
 This is a **full-stack authentication system** built with Next.js 16, featuring user registration, login, logout, and protected routes. It uses MongoDB for data storage, JWT tokens for authentication, and Next.js middleware for route protection.
 
+### ✨ Latest Updates (January 2, 2026)
+- **User Data Fetching**: Added `/api/users/me` endpoint to retrieve current user information
+- **Token Helper Utility**: Created `getDataFromToken` helper for extracting user data from JWT tokens
+- **Dynamic Profile Routes**: Implemented `/profile/[id]` for individual user profile pages
+- **Enhanced Profile Page**: Added "Fetch User" button to display current user ID with navigation to dynamic profile
+
 ---
 
 ## 🏗️ Architecture Overview
@@ -20,21 +26,25 @@ graph TB
         Login[Login Page]
         Signup[Signup Page]
         Profile[Profile Page]
+        DynamicProfile[Dynamic Profile /profile/[id]]
     end
     
     subgraph "API Endpoints"
         SignupAPI[/api/users/signup]
         LoginAPI[/api/users/login]
         LogoutAPI[/api/users/logout]
+        MeAPI[/api/users/me]
     end
     
     Client --> Login
     Client --> Signup
     Client --> Profile
+    Client --> DynamicProfile
     
     API --> SignupAPI
     API --> LoginAPI
     API --> LogoutAPI
+    API --> MeAPI
 ```
 
 ---
@@ -48,12 +58,17 @@ my-app/
 │   │   ├── api/users/          # API routes
 │   │   │   ├── signup/
 │   │   │   ├── login/
-│   │   │   └── logout/
+│   │   │   ├── logout/
+│   │   │   └── me/             # Get current user data
 │   │   ├── login/              # Login page
 │   │   ├── signup/             # Signup page
 │   │   └── profile/            # Protected profile pages
+│   │       ├── page.tsx        # Main profile page
+│   │       └── [id]/           # Dynamic user profile
 │   ├── dbConfig/               # Database connection
 │   ├── models/                 # Mongoose schemas
+│   ├── helpers/                # Utility functions
+│   │   └── getDataFromToken.ts # JWT token decoder
 │   └── middleware.ts           # Route protection
 └── .env.local                  # Environment variables
 ```
@@ -362,7 +377,122 @@ response.cookies.set("token", "", { ... })
 
 ---
 
-### 6. Middleware (Route Protection) ⭐
+---
+
+### 6. Get Current User Data Helper
+
+**File:** `src/helpers/getDataFromToken.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import jwt from "jsonwebtoken";
+
+export const getDataFromToken = (request: NextRequest) => {
+    try {
+        const token = request.cookies.get("token")?.value || "";
+        const decodedToken: any = jwt.verify(token, process.env.TOKEN_SECRET!);
+        return decodedToken.id;
+    } catch (error) {
+        console.log(error);
+        return null;
+    }
+};
+```
+
+**What it does:**
+- Extracts the JWT token from the request cookies
+- Decodes and verifies the token using the `TOKEN_SECRET`
+- Returns the user ID from the decoded token
+- Returns `null` if token is invalid or missing
+
+**Key Features:**
+```typescript
+const token = request.cookies.get("token")?.value || "";
+```
+- Gets token from httpOnly cookie
+- Uses optional chaining (`?.`) to safely access the value
+- Defaults to empty string if no token exists
+
+```typescript
+const decodedToken: any = jwt.verify(token, process.env.TOKEN_SECRET!);
+```
+- **`jwt.verify()`** - Verifies token signature and expiration
+- Throws error if token is invalid or expired
+- Returns decoded payload containing user data
+
+**Why this helper is useful:**
+- **Reusability** - Can be used in any API route that needs user information
+- **Security** - Centralized token verification logic
+- **Clean Code** - Avoids repeating token extraction code
+
+---
+
+### 7. Get Current User API Route
+
+**File:** `src/app/api/users/me/route.ts`
+
+```typescript
+import { getDataFromToken } from "@/helpers/getDataFromToken";
+import { NextRequest, NextResponse } from "next/server";
+import User from "@/models/userModel"
+import {connect} from "@/dbConfig/dbConfig"
+
+connect();
+
+export async function GET(request: NextRequest) {
+    try {
+        const userId = await getDataFromToken(request);
+        const user = await User.findOne({ _id: userId }).select("-password");
+        return NextResponse.json({data:user,message:"User found"});
+    } catch (error:any) {
+        console.log(error);
+        return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+}
+```
+
+**What it does:**
+- Protected endpoint that returns the currently logged-in user's data
+- Uses `getDataFromToken` helper to extract user ID from JWT
+- Fetches user from database (excluding password)
+- Returns user data in JSON format
+
+**Flow Breakdown:**
+
+1. **Extract User ID** → `getDataFromToken(request)` gets user ID from token
+2. **Query Database** → `User.findOne({ _id: userId })` finds the user
+3. **Exclude Password** → `.select("-password")` removes password from response
+4. **Return Data** → Send user data to client
+
+**Security Highlights:**
+```typescript
+.select("-password")
+```
+- **Critical security feature** - Never send password hash to client!
+- MongoDB query modifier that excludes the password field
+- Even though password is hashed, it should never be exposed
+
+**Example Response:**
+```json
+{
+    "data": {
+        "_id": "67a1234567abcdef",
+        "username": "johndoe",
+        "email": "john@example.com",
+        "isVerified": false,
+        "isAdmin": false
+    },
+    "message": "User found"
+}
+```
+
+**Error Handling:**
+- Returns **401 Unauthorized** if token is invalid or user not found
+- Catches any errors during token verification or database query
+
+---
+
+### 8. Middleware (Route Protection) ⭐
 
 **File:** `src/middleware.ts`
 
@@ -459,7 +589,7 @@ matcher: [
 
 ---
 
-### 7. Login Page (Client-Side)
+### 9. Login Page (Client-Side)
 
 **File:** `src/app/login/page.tsx`
 
@@ -577,45 +707,182 @@ export default function LoginPage(){
 
 ---
 
-### 8. Profile Page
+### 10. Profile Page (Enhanced)
 
 **File:** `src/app/profile/page.tsx`
 
 ```typescript
 "use client"
+import { NextResponse } from "next/server";
 import { useRouter } from "next/navigation";
 import axios from "axios";
 import { toast } from "react-hot-toast";
+import { useState , useEffect} from "react";
+import Link from "next/link";
 
-export default function ProfilePage(){
+export default function ProfilePage() {
     const router = useRouter()
+    const [data, setData] = useState("nothing")
     
     const handleLogout = async () => {
         try {
             axios.get("/api/users/logout")
             toast.success("Logout successful")
             router.push("/login")
-        } catch (error:any) {
+        } catch (error: any) {
             return toast.error(error.response.data.message)
         }
     }
     
+    const fetchUser = async () => {
+        try {
+            const response = await axios.get("/api/users/me")
+            setData(response.data.data._id)
+            console.log(response.data.data._id)
+        } catch (error: any) {
+            console.log(error)
+        }
+    }
+
     return (
         <div className="flex flex-col justify-center items-center w-full h-screen bg-black gap-4">
             <h1 className="h1 text-2xl text-center text-white">profile page</h1>
+            <h2>{data==="nothing"?"nothing":
+                <Link className="text-white bg-blue-500 p-2 rounded hover:bg-blue-600 transition"
+                href={`/profile/${data}`}>
+                {data}
+                </Link>}
+            </h2>
             <hr/>
+
             <button onClick={handleLogout} className="bg-red-500 text-white p-2 rounded hover:bg-red-600 transition">
                 Logout
             </button>
+
+            <button onClick={fetchUser} className="bg-blue-500 text-white p-2 rounded hover:bg-blue-600 transition">
+                Fetch User
+            </button>
+
         </div>
     )
 }
 ```
 
-**Protected Route:**
-- Only accessible if user has valid JWT token
-- Middleware automatically redirects guests to `/login`
-- Logout button clears token and redirects to login page
+**New Features:**
+
+1. **User Data State:**
+   ```typescript
+   const [data, setData] = useState("nothing")
+   ```
+   - Stores the current user's ID
+   - Initially set to "nothing" before fetching
+
+2. **Fetch User Function:**
+   ```typescript
+   const fetchUser = async () => {
+       const response = await axios.get("/api/users/me")
+       setData(response.data.data._id)
+   }
+   ```
+   - Calls the new `/api/users/me` endpoint
+   - Extracts user ID from response
+   - Updates component state with user ID
+
+3. **Dynamic Link to User Profile:**
+   ```typescript
+   <Link href={`/profile/${data}`}>
+       {data}
+   </Link>
+   ```
+   - Creates a clickable link to `/profile/[id]`
+   - Only displays when user ID is fetched
+   - Shows "nothing" before fetching
+
+4. **Fetch User Button:**
+   ```typescript
+   <button onClick={fetchUser}>Fetch User</button>
+   ```
+   - Triggers user data retrieval
+   - Demonstrates interaction with the `/api/users/me` endpoint
+
+**User Flow:**
+1. User visits `/profile` (must be logged in)
+2. Page displays "nothing" initially
+3. User clicks "Fetch User" button
+4. App calls `/api/users/me` with JWT token
+5. Server returns user data
+6. User ID displays as clickable link
+7. Clicking link navigates to `/profile/[userId]`
+
+---
+
+### 11. Dynamic User Profile Page
+
+**File:** `src/app/profile/[id]/page.tsx`
+
+```typescript
+interface UserProfileParams {
+    id: string;
+}
+
+type PageProps = {
+    params: Promise<UserProfileParams>;
+};
+
+export default async function UserProfile({ params }: PageProps) {
+    const { id } = await params; 
+    
+    return (
+        <div className="flex flex-col justify-center items-center w-full h-screen bg-black gap-4">
+            <h1 className="h1 text-2xl text-center text-white">profile page</h1>
+            <p className="text-white">User ID: {id}</p>
+        </div>
+    );
+}
+```
+
+**What it does:**
+- Creates a dynamic route at `/profile/[id]`
+- Displays individual user profile based on URL parameter
+- **Server Component** (no "use client" directive)
+
+**Key Concepts:**
+
+1. **Dynamic Route Segment:**
+   ```typescript
+   [id]
+   ```
+   - The folder name `[id]` creates a dynamic route
+   - Matches any path like `/profile/123`, `/profile/abc`, etc.
+   - The value becomes available in the `params` object
+
+2. **Async Params (Next.js 16):**
+   ```typescript
+   params: Promise<UserProfileParams>
+   const { id } = await params;
+   ```
+   - In Next.js 16, `params` is a Promise that must be awaited
+   - This is a breaking change from Next.js 15
+   - Ensures params are ready before rendering
+
+3. **TypeScript Typing:**
+   ```typescript
+   interface UserProfileParams {
+       id: string;
+   }
+   ```
+   - Provides type safety for dynamic route parameters
+   - Ensures `id` is always a string
+
+**Example URLs:**
+- `/profile/67a1234567abcdef` → Shows User ID: 67a1234567abcdef
+- `/profile/anything` → Shows User ID: anything
+
+**Future Enhancements:**
+- Fetch full user data using the ID
+- Display username, email, and other non-sensitive information
+- Add edit profile functionality (if viewing own profile)
+- Show different content for admins
 
 ---
 
@@ -769,6 +1036,40 @@ sequenceDiagram
 
 ---
 
+### Get User Data Flow (New)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Client (Profile Page)
+    participant A as API (/api/users/me)
+    participant H as Helper (getDataFromToken)
+    participant DB as MongoDB
+
+    U->>C: Clicks "Fetch User" button
+    C->>A: GET /api/users/me (with token cookie)
+    A->>H: Extract user ID from token
+    H->>H: Verify JWT signature
+    H-->>A: Return user ID
+    A->>DB: Find user by ID
+    DB-->>A: User data (excluding password)
+    A-->>C: JSON response with user data
+    C->>C: Update state with user ID
+    C->>C: Display clickable link to /profile/[id]
+```
+
+**Step-by-Step:**
+1. User clicks "Fetch User" button on profile page
+2. Client sends GET request to `/api/users/me` with JWT token in cookie
+3. Server extracts and verifies JWT token using `getDataFromToken` helper
+4. Helper decodes token and returns user ID
+5. Server queries MongoDB for user data (excluding password field)
+6. Server returns user data in JSON format
+7. Client updates state with user ID
+8. User ID displays as clickable link to dynamic profile page
+
+---
+
 ## 🛡️ Security Features
 
 | Feature | Implementation | Protection Against |
@@ -779,6 +1080,7 @@ sequenceDiagram
 | **Middleware Protection** | Route-level authentication | Unauthorized access |
 | **Environment Variables** | Server-side secrets | Credential exposure |
 | **Token Expiration** | 1 day expiry | Stolen token abuse |
+| **Password Exclusion** | `.select("-password")` in queries | Sensitive data exposure |
 
 ### Security Deep Dive
 
@@ -1059,17 +1361,50 @@ Server runs at: `http://localhost:3000`
 
 ---
 
+### 7. Test Fetch User Data (New)
+
+1. Login to your account
+2. Visit `/profile`
+3. Click "Fetch User" button
+4. Should display your user ID
+5. User ID should be shown as a clickable blue link
+6. Click the user ID link
+7. Should navigate to `/profile/[your-user-id]`
+8. Dynamic profile page should display "User ID: [your-user-id]"
+
+**Testing the API directly:**
+- Open browser DevTools → Network tab
+- Click "Fetch User" button
+- Inspect the request to `/api/users/me`
+- Response should contain user data (without password field)
+
+---
+
+### 8. Test Dynamic Routes
+
+1. Login first
+2. Visit `/profile/123abc` in browser
+3. Should show "User ID: 123abc"
+4. Try `/profile/test-user` → Shows "User ID: test-user"
+5. Dynamic `[id]` parameter is captured from URL
+
+---
+
 ## 🎯 What You've Built
 
 ✅ **User Registration** with password hashing  
 ✅ **User Login** with JWT authentication  
 ✅ **Protected Routes** with middleware  
 ✅ **Logout Functionality** with cookie clearing  
+✅ **User Data Fetching** with `/api/users/me` endpoint *(New)*  
+✅ **Dynamic Profile Routes** with `/profile/[id]` *(New)*  
+✅ **JWT Token Helper** with `getDataFromToken` utility *(New)*  
 ✅ **Database Integration** with MongoDB Atlas  
 ✅ **Type Safety** with TypeScript  
 ✅ **Modern UI** with React and Tailwind CSS  
-✅ **Security Best Practices** (httpOnly cookies, bcrypt, JWT)  
-✅ **Scalable Architecture** (API routes, middleware, client/server components)  
+✅ **Security Best Practices** (httpOnly cookies, bcrypt, JWT, password exclusion)  
+✅ **Scalable Architecture** (API routes, middleware, client/server components, helper utilities)  
+
 
 ---
 
@@ -1166,8 +1501,10 @@ npm install --save-dev @types/jsonwebtoken
 - ✅ Next.js App Router
 - ✅ API Routes
 - ✅ Middleware
+- ✅ Dynamic Routes *(New - `/profile/[id]`)*
 - ✅ MongoDB with Mongoose
 - ✅ JWT Authentication
+- ✅ JWT Token Decoding *(New - `getDataFromToken` helper)*
 - ✅ Password Hashing
 - ✅ TypeScript
 - ✅ React Hooks
@@ -1175,6 +1512,7 @@ npm install --save-dev @types/jsonwebtoken
 
 ### Further Reading:
 - [Next.js Documentation](https://nextjs.org/docs)
+- [Next.js Dynamic Routes](https://nextjs.org/docs/app/building-your-application/routing/dynamic-routes)
 - [JWT.io](https://jwt.io) - JWT debugger
 - [Mongoose Docs](https://mongoosejs.com/docs/)
 - [bcrypt Explained](https://en.wikipedia.org/wiki/Bcrypt)
@@ -1189,6 +1527,9 @@ You've built a **production-ready authentication system** that follows industry 
 - 🔐 Secure password storage with bcrypt
 - 🎫 Stateless authentication with JWT
 - 🛡️ Route protection with middleware
+- 👤 User data fetching with protected endpoints *(New)*
+- 🔀 Dynamic routing for user profiles *(New)*
+- 🛠️ Reusable helper utilities *(New)*
 - 📦 Clean architecture with separation of concerns
 - 🚀 Scalable design ready for production
 
@@ -1198,5 +1539,20 @@ This project demonstrates understanding of:
 - Database design
 - API development
 - Modern React patterns
+- Dynamic routing in Next.js *(New)*
+- Helper utility patterns *(New)*
 
 **Great work!** 🎊
+
+---
+
+## 📅 Change Log
+
+### January 2, 2026 - User Data Features
+- ✨ **Added** `/api/users/me` endpoint for fetching current user data
+- ✨ **Created** `getDataFromToken` helper utility for JWT token extraction
+- ✨ **Implemented** dynamic profile routes at `/profile/[id]`
+- ✨ **Enhanced** profile page with "Fetch User" functionality
+- 🔒 **Security** - Ensured password field exclusion in user data responses
+- 📝 **Documentation** - Updated PROJECT_OVERVIEW.md with all new features
+
